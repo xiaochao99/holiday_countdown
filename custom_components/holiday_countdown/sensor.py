@@ -101,36 +101,94 @@ class HolidayCountdownSensor(Entity):
             if need_update:
                 _LOGGER.debug("需要更新节假日数据")
                 
+                # 获取当年节假日数据
                 url = f"https://timor.tech/api/holiday/year/{current_year}"
                 _LOGGER.debug("请求URL: %s", url)
                 
                 try:
                     headers = {'User-Agent': 'HomeAssistant/1.0'}
+                    _LOGGER.debug("开始请求节假日数据，URL: %s", url)
+                    
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(url, headers=headers, timeout=8) as response:
-                            response.raise_for_status()
-                            data = await response.json()
-                            
-                            if data.get('code') == 0:
-                                self._holidays = self._parse_holiday_data(data.get('holiday', {}), current_year)
-                                _LOGGER.info("获取 %d 年节假日成功，共 %d 个节假日", current_year, len(self._holidays))
+                        try:
+                            _LOGGER.debug("发送HTTP请求...")
+                            async with session.get(url, headers=headers, timeout=10) as response:
+                                _LOGGER.debug("收到响应，状态码: %d", response.status)
+                                _LOGGER.debug("响应头: %s", dict(response.headers))
                                 
-                                await self._store.async_save({
-                                    'holidays': [{
-                                        'date': holiday['date'].isoformat(),
-                                        'name': holiday['name'],
-                                        'duration': holiday['duration']
-                                    } for holiday in self._holidays],
-                                    'last_updated': now.isoformat()
-                                })
-                                self._last_updated = now
-                                _LOGGER.info("节假日数据已缓存")
+                                response.raise_for_status()
+                                _LOGGER.debug("HTTP请求成功，开始解析JSON数据...")
                                 
-                                self._process_next_holiday()
-                            else:
-                                _LOGGER.error("API返回错误: %s", data.get('msg', '未知错误'))
+                                try:
+                                    data = await response.json()
+                                    _LOGGER.debug("JSON解析成功，数据结构: %s", type(data))
+                                    _LOGGER.debug("完整响应数据: %s", data)
+                                except Exception as json_error:
+                                    _LOGGER.error("JSON解析失败，原始响应: %s", await response.text())
+                                    _LOGGER.error("JSON解析错误详情: %s", json_error)
+                                    raise
+                                
+                                if data.get('code') == 0:
+                                    holiday_data = data.get('holiday', {})
+                                    _LOGGER.debug("节假日数据: %s", holiday_data)
+                                    
+                                    self._holidays = self._parse_holiday_data(holiday_data, current_year)
+                                    _LOGGER.info("获取 %d 年节假日成功，共 %d 个节假日", current_year, len(self._holidays))
+                                    
+                                    # 检查当年是否有有效节假日，如果没有则获取下一年的数据
+                                    if not self._has_valid_holidays(self._holidays):
+                                        _LOGGER.info("当年无有效节假日，尝试获取下一年的节假日数据")
+                                        _LOGGER.debug("当前节假日列表: %s", self._holidays)
+                                        try:
+                                            next_year_holidays = await self._get_next_year_holidays(current_year + 1)
+                                            if next_year_holidays:
+                                                self._holidays.extend(next_year_holidays)
+                                                _LOGGER.info("获取下一年的节假日数据成功，共 %d 个节假日", len(next_year_holidays))
+                                            else:
+                                                _LOGGER.warning("获取下一年节假日数据失败，将使用当年数据")
+                                        except Exception as next_year_error:
+                                            _LOGGER.warning("获取下一年节假日数据时出错: %s，将使用当年数据", next_year_error)
+                                    
+                                    if self._holidays:  # 确保有数据才保存
+                                        _LOGGER.debug("准备保存节假日数据到缓存...")
+                                        await self._store.async_save({
+                                            'holidays': [{
+                                                'date': holiday['date'].isoformat(),
+                                                'name': holiday['name'],
+                                                'duration': holiday['duration']
+                                            } for holiday in self._holidays],
+                                            'last_updated': now.isoformat()
+                                        })
+                                        self._last_updated = now
+                                        _LOGGER.info("节假日数据已缓存")
+                                        
+                                        self._process_next_holiday()
+                                    else:
+                                        _LOGGER.warning("没有获取到任何节假日数据")
+                                else:
+                                    error_msg = data.get('msg', '未知错误')
+                                    error_code = data.get('code', '未知错误码')
+                                    _LOGGER.error("API返回错误 - 错误码: %s, 错误信息: %s", error_code, error_msg)
+                                    _LOGGER.error("完整错误响应: %s", data)
+                        except aiohttp.ClientResponseError as response_error:
+                            _LOGGER.error("HTTP响应错误 - 状态码: %d, 状态: %s", response_error.status, response_error.message)
+                            _LOGGER.error("请求URL: %s", response_error.request_info.url if response_error.request_info else "未知")
+                            raise
+                except aiohttp.ClientConnectorError as connector_error:
+                    _LOGGER.error("网络连接失败: %s", connector_error)
+                    _LOGGER.error("可能的原因: 网络不可达、DNS解析失败或服务器拒绝连接")
+                except aiohttp.ClientTimeout as timeout_error:
+                    _LOGGER.error("请求超时: %s", timeout_error)
+                    _LOGGER.error("可能的原因: 网络延迟过高或服务器响应缓慢")
+                except aiohttp.ClientError as e:
+                    _LOGGER.error("网络请求失败: %s", e)
+                    _LOGGER.error("错误类型: %s", type(e).__name__)
+                except ValueError as e:
+                    _LOGGER.error("JSON解析失败: %s", e)
+                    _LOGGER.error("可能的原因: API返回的不是有效的JSON格式")
                 except Exception as e:
-                    _LOGGER.error("获取节假日数据失败: %s", e)
+                    _LOGGER.error("获取节假日数据失败: %s", e, exc_info=True)
+                    _LOGGER.error("错误类型: %s", type(e).__name__)
         except Exception as e:
             _LOGGER.error("更新节假日数据出错: %s", e, exc_info=True)
             self._state = "错误"
@@ -141,9 +199,29 @@ class HolidayCountdownSensor(Entity):
         holidays = []
         today = dt_util.now().date()
         
+        _LOGGER.debug("开始解析 %d 年的节假日数据", year)
+        _LOGGER.debug("原始节假日数据类型: %s", type(holiday_data))
+        _LOGGER.debug("原始节假日数据长度: %d", len(holiday_data) if holiday_data else 0)
+        
+        if not holiday_data or not isinstance(holiday_data, dict):
+            _LOGGER.warning("节假日数据为空或格式无效: %s", holiday_data)
+            return []
+        
+        processed_count = 0
+        skipped_count = 0
+        
         for date_str, info in holiday_data.items():
             try:
+                _LOGGER.debug("处理日期: %s, 信息: %s", date_str, info)
+                
+                if not info or not isinstance(info, dict):
+                    _LOGGER.debug("跳过无效的节假日信息: %s - %s", date_str, info)
+                    skipped_count += 1
+                    continue
+                    
                 if info.get('holiday'):
+                    # 处理日期格式
+                    original_date_str = date_str
                     if '-' in date_str:
                         parts = date_str.split('-')
                         if len(parts) == 2:
@@ -151,16 +229,40 @@ class HolidayCountdownSensor(Entity):
                         elif len(parts) == 3 and len(parts[0]) != 4:
                             date_str = f"{year}-{parts[1]}-{parts[2]}"
                     
-                    date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+                    _LOGGER.debug("日期格式处理: %s -> %s", original_date_str, date_str)
                     
-                    if (date_obj - today).days >= -30:
+                    try:
+                        date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+                    except ValueError as date_error:
+                        _LOGGER.warning("日期格式无效 '%s': %s", date_str, date_error)
+                        skipped_count += 1
+                        continue
+                    
+                    days_diff = (date_obj - today).days
+                    _LOGGER.debug("日期 %s 与今天相差: %d 天", date_obj, days_diff)
+                    
+                    if days_diff >= -30:
+                        holiday_name = info.get('name', '未知节日')
                         holidays.append({
                             'date': date_obj,
-                            'name': info.get('name', '未知节日'),
-                            'original_name': info.get('name', '未知节日')
+                            'name': holiday_name,
+                            'original_name': holiday_name
                         })
+                        processed_count += 1
+                        _LOGGER.debug("添加节假日: %s (%s), 相差 %d 天", holiday_name, date_obj, days_diff)
+                    else:
+                        _LOGGER.debug("跳过过期节假日: %s (%s), 相差 %d 天", 
+                                     info.get('name', '未知节日'), date_obj, days_diff)
+                        skipped_count += 1
+                else:
+                    _LOGGER.debug("非节假日日期: %s", date_str)
+                    skipped_count += 1
             except Exception as e:
-                _LOGGER.warning("解析节假日 '%s' 失败: %s", date_str, e)
+                _LOGGER.warning("解析节假日 '%s' 失败: %s", date_str, e, exc_info=True)
+                skipped_count += 1
+        
+        _LOGGER.info("解析完成 - 年份: %d, 处理: %d, 跳过: %d, 最终节假日: %d", 
+                    year, processed_count, skipped_count, len(holidays))
         
         grouped = {}
         for holiday in holidays:
@@ -188,6 +290,70 @@ class HolidayCountdownSensor(Entity):
             if pos > 0:
                 return name[:pos].strip()
         return name
+    
+    def _has_valid_holidays(self, holidays):
+        """检查是否有有效的节假日（未来的节假日）"""
+        try:
+            today = dt_util.now().date()
+            for holiday in holidays:
+                if holiday['date'] >= today:
+                    return True
+            return False
+        except Exception as e:
+            _LOGGER.error("检查节假日有效性失败: %s", e)
+            return False
+    
+    async def _get_next_year_holidays(self, year):
+        """获取下一年的节假日数据"""
+        try:
+            url = f"https://timor.tech/api/holiday/year/{year}"
+            _LOGGER.info("请求下一年节假日数据，URL: %s", url)
+            
+            headers = {'User-Agent': 'HomeAssistant/1.0'}
+            async with aiohttp.ClientSession() as session:
+                try:
+                    _LOGGER.debug("开始请求下一年节假日数据...")
+                    async with session.get(url, headers=headers, timeout=10) as response:
+                        _LOGGER.debug("下一年数据响应状态码: %d", response.status)
+                        response.raise_for_status()
+                        
+                        try:
+                            data = await response.json()
+                            _LOGGER.debug("下一年数据JSON解析成功")
+                            _LOGGER.debug("下一年完整响应: %s", data)
+                        except Exception as json_error:
+                            _LOGGER.error("下一年数据JSON解析失败，原始响应: %s", await response.text())
+                            raise
+                        
+                        if data.get('code') == 0:
+                            holiday_data = data.get('holiday', {})
+                            _LOGGER.debug("下一年节假日原始数据: %s", holiday_data)
+                            
+                            holidays = self._parse_holiday_data(holiday_data, year)
+                            _LOGGER.info("成功获取 %d 年节假日数据: %d 个", year, len(holidays))
+                            _LOGGER.debug("解析后的节假日: %s", holidays)
+                            return holidays
+                        else:
+                            error_msg = data.get('msg', '未知错误')
+                            error_code = data.get('code', '未知错误码')
+                            _LOGGER.warning("下一年数据API返回错误 - 错误码: %s, 错误信息: %s", error_code, error_msg)
+                            _LOGGER.warning("下一年数据完整错误响应: %s", data)
+                            return []
+                except aiohttp.ClientResponseError as response_error:
+                    _LOGGER.error("下一年数据HTTP响应错误 - 状态码: %d, 状态: %s", response_error.status, response_error.message)
+                    raise
+        except aiohttp.ClientConnectorError as connector_error:
+            _LOGGER.warning("下一年数据网络连接失败: %s", connector_error)
+        except aiohttp.ClientTimeout as timeout_error:
+            _LOGGER.warning("下一年数据请求超时: %s", timeout_error)
+        except aiohttp.ClientError as e:
+            _LOGGER.warning("获取下一年节假日数据网络请求失败: %s", e)
+        except ValueError as e:
+            _LOGGER.warning("获取下一年节假日数据JSON解析失败: %s", e)
+        except Exception as e:
+            _LOGGER.warning("获取下一年节假日数据失败: %s", e)
+        
+        return []
     
     def _process_next_holiday(self):
         try:
