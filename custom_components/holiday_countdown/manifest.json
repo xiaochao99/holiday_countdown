@@ -1,7 +1,7 @@
 {
   "domain": "holiday_countdown",
   "name": "节假日倒计时",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "codeowners": ["@anxms"],
   "documentation": "https://github.com/anxms/holiday_countdown_ha",
   "issue_tracker": "https://github.com/anxms/holiday_countdown_ha/issues",

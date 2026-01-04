@@ -17,7 +17,7 @@ MIN_TIME_BETWEEN_UPDATES = datetime.timedelta(hours=6)
 class HolidayCountdownSensor(Entity):
     def __init__(self, hass):
         self._hass = hass
-        self._state = None
+        self._state = False
         self._attributes = {
             ATTRIBUTES['name']: "加载中...",
             ATTRIBUTES['days']: None,
@@ -25,7 +25,7 @@ class HolidayCountdownSensor(Entity):
             ATTRIBUTES['date']: None,
             ATTRIBUTES['next']: None
         }
-        self._unique_id = "holiday_countdown_cn"
+        self._unique_id = "holiday_sensor_cn"
         self._store = storage.Store(hass, 1, DATA_CACHE_KEY)
         self._last_updated = None
         self._holidays = []
@@ -40,11 +40,11 @@ class HolidayCountdownSensor(Entity):
 
     @property
     def state(self):
-        return self._state
+        return "on" if self._state else "off"
 
     @property
     def icon(self):
-        return "mdi:calendar-star"
+        return "mdi:calendar-check" if self._state else "mdi:calendar-outline"
 
     @property
     def extra_state_attributes(self):
@@ -191,7 +191,7 @@ class HolidayCountdownSensor(Entity):
                     _LOGGER.error("错误类型: %s", type(e).__name__)
         except Exception as e:
             _LOGGER.error("更新节假日数据出错: %s", e, exc_info=True)
-            self._state = "错误"
+            self._state = False
             self._attributes[ATTRIBUTES['name']] = f"错误: {str(e)}"
     
     def _parse_holiday_data(self, holiday_data, year):
@@ -358,46 +358,82 @@ class HolidayCountdownSensor(Entity):
     def _process_next_holiday(self):
         try:
             today = dt_util.now().date()
+            current_holiday = None
             next_holiday = None
             
+            # 检查是否有正在进行的节假日（今天在节假日日期范围内）
             for holiday in self._holidays:
-                if holiday['date'] >= today:
-                    next_holiday = holiday
+                holiday_start = holiday['date']
+                holiday_end = holiday['date'] + datetime.timedelta(days=holiday['duration'] - 1)
+                
+                if holiday_start <= today <= holiday_end:
+                    current_holiday = holiday
+                    _LOGGER.info("今天是节假日: %s (开始: %s, 结束: %s, 持续: %d 天)",
+                                holiday['name'], holiday_start, holiday_end, holiday['duration'])
                     break
             
-            if next_holiday:
-                days_left = (next_holiday['date'] - today).days
+            if current_holiday:
+                # 今天是节假日
+                holiday_end = current_holiday['date'] + datetime.timedelta(days=current_holiday['duration'] - 1)
+                days_remaining = (holiday_end - today).days
                 
-                self._state = days_left
+                self._state = True
                 self._attributes = {
-                    ATTRIBUTES['name']: next_holiday['name'],
-                    ATTRIBUTES['days']: next_holiday['duration'],
-                    ATTRIBUTES['countdown']: days_left,
-                    ATTRIBUTES['date']: next_holiday['date'].isoformat(),
-                    ATTRIBUTES['next']: self._get_next_holiday(next_holiday) or "无"
+                    ATTRIBUTES['name']: current_holiday['name'],
+                    ATTRIBUTES['days']: current_holiday['duration'],
+                    ATTRIBUTES['countdown']: f"剩余 {days_remaining} 天",
+                    ATTRIBUTES['date']: current_holiday['date'].isoformat(),
+                    ATTRIBUTES['next']: self._get_next_holiday(current_holiday) or "无"
                 }
+                _LOGGER.debug("节假日进行中 - 名称: %s, 剩余天数: %d", current_holiday['name'], days_remaining)
             else:
-                self._state = 0
-                self._attributes = {
-                    ATTRIBUTES['name']: "今年无更多节假日",
-                    ATTRIBUTES['days']: 0,
-                    ATTRIBUTES['countdown']: 0,
-                    ATTRIBUTES['date']: None,
-                    ATTRIBUTES['next']: None
-                }
+                # 今天不是节假日，查找下一个节假日
+                for holiday in self._holidays:
+                    if holiday['date'] > today:
+                        next_holiday = holiday
+                        break
+                
+                self._state = False
+                
+                if next_holiday:
+                    days_left = (next_holiday['date'] - today).days
+                    
+                    self._attributes = {
+                        ATTRIBUTES['name']: "非节假日",
+                        ATTRIBUTES['days']: next_holiday['duration'],
+                        ATTRIBUTES['countdown']: f"距离 {next_holiday['name']} 还有 {days_left} 天",
+                        ATTRIBUTES['date']: next_holiday['date'].isoformat(),
+                        ATTRIBUTES['next']: self._get_next_holiday(next_holiday) or "无"
+                    }
+                    _LOGGER.debug("下一个节假日 - 名称: %s, 倒计时: %d 天", next_holiday['name'], days_left)
+                else:
+                    self._attributes = {
+                        ATTRIBUTES['name']: "非节假日",
+                        ATTRIBUTES['days']: 0,
+                        ATTRIBUTES['countdown']: "今年无更多节假日",
+                        ATTRIBUTES['date']: None,
+                        ATTRIBUTES['next']: None
+                    }
+                    _LOGGER.info("没有找到未来的节假日")
         except Exception as e:
             _LOGGER.error("处理节假日数据失败: %s", e, exc_info=True)
+            self._state = False
             self._state = "数据处理错误"
             self._attributes[ATTRIBUTES['name']] = f"处理错误: {str(e)}"
     
     def _get_next_holiday(self, current_holiday):
         try:
-            current_date = current_holiday['date']
+            today = dt_util.now().date()
+            current_holiday_start = current_holiday['date']
+            current_holiday_end = current_holiday_start + datetime.timedelta(days=current_holiday['duration'] - 1)
+            
             for holiday in self._holidays:
-                if holiday['date'] > current_date:
+                holiday_start = holiday['date']
+                # 找到在当前节假日结束之后的第一个节假日
+                if holiday_start > current_holiday_end:
                     return holiday['name']
-        except:
-            pass
+        except Exception as e:
+            _LOGGER.error("获取下一个节假日失败: %s", e)
         return None
 
 async def async_setup_entry(hass, config_entry, async_add_entities):
