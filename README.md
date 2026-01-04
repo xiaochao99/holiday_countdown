@@ -16,7 +16,7 @@
 
 1. 确保已安装[HACS]
 2. 在HACS中添加自定义存储库:
-   - 仓库: https://github.com/anxms/holiday_countdown_ha
+   - 仓库: https://github.com/xiaochao99/holiday_countdown
    - 类别: 集成
 3. 安装"节假日检测"
 4. 重启Home Assistant
